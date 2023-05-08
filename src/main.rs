@@ -1,13 +1,15 @@
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::Read,
+    io::{Read, Write, self, BufRead},
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
 use clap::{Parser, Subcommand};
 use error::VelesError;
+use flate2::{write::GzEncoder, Compression, read::GzDecoder};
+use ring::digest;
 use serde::{Deserialize, Serialize};
 use storage::VelesStore;
 
@@ -23,10 +25,26 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    Commit {
+        #[arg(short, long)]
+        file: String,
+    },
+    Uncommit {
+        #[arg(long)]
+        hash: String,
+
+        #[arg(short, long)]
+        output: Option<String>,
+    },
     Index {
         #[command(subcommand)]
         command: IndexCmd,
     },
+    Add {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    Submit,
     Status,
     Storage {
         #[command(subcommand)]
@@ -60,11 +78,94 @@ fn main() {
     let args = Args::parse();
 
     match args.command {
+        Command::Commit { file } => commit(file),
+        Command::Uncommit { hash, output } => uncommit(hash, output),
         Command::Status => status(),
         Command::Storage { command } => storage(&command),
         Command::Index { command } => index(&command),
+        Command::Add { file } => add(file),
+        Command::Submit => submit(),
     }
     .unwrap()
+}
+
+fn submit() -> Result<(), VelesError> {
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
+    let input = lines.next().unwrap().unwrap();
+    println!("Input: {}", input);
+
+    Ok(())
+}
+
+fn add(file: PathBuf) -> Result<(), VelesError> {
+    if !file.exists() {
+        return Err(VelesError::NotFound);
+    }
+
+    let mut stage = OpenOptions::new().create(true).write(true).open(".veles/staged.bin")?;
+    let content = format!("{}\n", file.as_os_str().to_string_lossy());
+
+    stage.write_all(content.as_bytes())?;
+
+    Ok(())
+}
+
+fn uncommit(hash: String, output: Option<String>) -> Result<(), VelesError> {
+    let path = PathBuf::from(".veles/").join(&hash[..2]);
+    let file_path = path.join(&hash[2..]);
+    let file = OpenOptions::new().read(true).open(file_path)?;
+    let mut decoder = GzDecoder::new(file);
+
+    let mut buf = Vec::new();
+    decoder.read_to_end(&mut buf)?;
+
+    if let Some(out) = output {
+        let mut new_file = OpenOptions::new().create(true).write(true).open(out)?;
+        new_file.write_all(&buf)?;
+    } else {
+        if let Ok(str) = String::from_utf8(buf) {
+            println!("{}", str);
+        } else {
+            println!("Failed to parse data as utf-8");
+        }
+    }
+
+    Ok(())
+}
+
+fn commit(file: String) -> Result<(), VelesError> {
+    let mut file = OpenOptions::new().read(true).open(file)?;
+
+    let mut buffer = [0; 1024];
+    let mut context = digest::Context::new(&digest::SHA256);
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+
+    loop {
+        let read = file.read(&mut buffer)?;
+
+        if read == 0 {
+            break;
+        }
+
+        context.update(&buffer[..read]);
+        encoder.write_all(&buffer[..read])?;
+    }
+
+    let digest = context.finish();
+    let hex_digest = hex::encode(&digest);
+    let compressed = encoder.finish()?;
+
+    let path = PathBuf::from(".veles/").join(&hex_digest[..2]);
+    fs::create_dir_all(&path)?;
+
+    let new_file_path = path.join(&hex_digest[2..40]);
+    let mut new_file = OpenOptions::new().create(true).write(true).open(new_file_path)?;
+    new_file.write_all(&compressed)?;
+
+    println!("Wrote: {}", &hex_digest[..40]);
+
+    Ok(())
 }
 
 struct DirIterator {
