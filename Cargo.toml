@@ -20,3 +20,6 @@ ring = "0.16.20"
 serde = { version = "1.0.160", features = ["derive"] }
 thiserror = "1.0.40"
 
+[dependencies.rusqlite]
+version = "0.29.0"
+features = ["bundled"]

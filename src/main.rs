@@ -1,15 +1,16 @@
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::{Read, Write, self, BufRead},
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
 use clap::{Parser, Subcommand};
 use error::VelesError;
-use flate2::{write::GzEncoder, Compression, read::GzDecoder};
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use ring::digest;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use storage::VelesStore;
 
@@ -44,8 +45,12 @@ enum Command {
         #[arg(short, long)]
         file: PathBuf,
     },
-    Submit,
+    Submit {
+        #[arg(short, long)]
+        message: String,
+    },
     Status,
+    Log,
     Storage {
         #[command(subcommand)]
         command: StorageCmd,
@@ -84,16 +89,112 @@ fn main() {
         Command::Storage { command } => storage(&command),
         Command::Index { command } => index(&command),
         Command::Add { file } => add(file),
-        Command::Submit => submit(),
+        Command::Submit { message } => submit(message),
+        Command::Log => log(),
     }
     .unwrap()
 }
 
-fn submit() -> Result<(), VelesError> {
-    let stdin = io::stdin();
-    let mut lines = stdin.lock().lines();
-    let input = lines.next().unwrap().unwrap();
-    println!("Input: {}", input);
+struct VelesChange {
+    id: u32,
+    description: String,
+}
+
+struct VelesFile {
+    filename: String,
+    revision: u32,
+}
+
+fn log() -> Result<(), VelesError> {
+    let conn = Connection::open(".veles/veles.db3")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS files (
+            filename TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL
+        )",
+        (),
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS changes (
+            id INTEGER PRIMARY KEY,
+            description TEXT NOT NULL
+        )",
+        (),
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO files (filename, revision) VALUES (?1, ?2)",
+        ("src/error.rs", 1),
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO files (filename, revision) VALUES (?1, ?2)",
+        ("src/main.rs", 2),
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO files (filename, revision) VALUES (?1, ?2)",
+        ("src/storage.rs", 2),
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO changes (id, description) VALUES (?1, ?2)",
+        (1, "Initial commit."),
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO changes (id, description) VALUES (?1, ?2)",
+        (2, "Testing."),
+    )?;
+
+    let mut statement = conn.prepare("SELECT id, description FROM changes")?;
+    let change_iter = statement.query_map([], |row| {
+        Ok(VelesChange {
+            id: row.get(0)?,
+            description: row.get(1)?,
+        })
+    })?;
+
+    for change in change_iter {
+        let change = change?;
+        println!("Change: {} - {}", change.id, change.description);
+
+        let mut statement = conn.prepare("SELECT filename FROM files WHERE revision = ?1")?;
+        let file_iter = statement.query_map([change.id], |row| {
+            Ok(VelesFile {
+                filename: row.get(0)?,
+                revision: change.id,
+            })
+        })?;
+
+        for file in file_iter {
+            let file = file?;
+            println!("  File: {}", file.filename);
+        }
+
+        println!("====================");
+    }
+
+    Ok(())
+}
+
+fn submit(message: String) -> Result<(), VelesError> {
+    let stage_path = PathBuf::from(".veles/staged.bin");
+    if !stage_path.exists() {
+        return Err(VelesError::NotFound);
+    }
+
+    let hash = do_commit(stage_path)?;
+
+    let mut commits = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(".veles/commits.bin")?;
+    let line = format!("{}\n{}\n{}\n", "1", message, hash);
+
+    commits.write_all(line.as_bytes())?;
 
     Ok(())
 }
@@ -103,8 +204,13 @@ fn add(file: PathBuf) -> Result<(), VelesError> {
         return Err(VelesError::NotFound);
     }
 
-    let mut stage = OpenOptions::new().create(true).write(true).open(".veles/staged.bin")?;
-    let content = format!("{}\n", file.as_os_str().to_string_lossy());
+    let hash = do_commit(file.clone())?;
+
+    let mut stage = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(".veles/staged.bin")?;
+    let content = format!("{} {}\n", file.as_os_str().to_string_lossy(), hash);
 
     stage.write_all(content.as_bytes())?;
 
@@ -135,6 +241,14 @@ fn uncommit(hash: String, output: Option<String>) -> Result<(), VelesError> {
 }
 
 fn commit(file: String) -> Result<(), VelesError> {
+    let hash = do_commit(PathBuf::from(file))?;
+
+    println!("Wrote {}", hash);
+
+    Ok(())
+}
+
+fn do_commit(file: PathBuf) -> Result<String, VelesError> {
     let mut file = OpenOptions::new().read(true).open(file)?;
 
     let mut buffer = [0; 1024];
@@ -160,12 +274,15 @@ fn commit(file: String) -> Result<(), VelesError> {
     fs::create_dir_all(&path)?;
 
     let new_file_path = path.join(&hex_digest[2..40]);
-    let mut new_file = OpenOptions::new().create(true).write(true).open(new_file_path)?;
-    new_file.write_all(&compressed)?;
+    if !new_file_path.exists() {
+        let mut new_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(new_file_path)?;
+        new_file.write_all(&compressed)?;
+    }
 
-    println!("Wrote: {}", &hex_digest[..40]);
-
-    Ok(())
+    Ok(hex_digest[..40].to_string())
 }
 
 struct DirIterator {

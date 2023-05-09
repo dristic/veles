@@ -16,6 +16,9 @@ pub enum VelesError {
     #[error("CRC check failed")]
     CorruptedData,
 
+    #[error("DB Error")]
+    DBError(#[from] rusqlite::Error),
+
     #[error("Data not found")]
     NotFound,
 }
