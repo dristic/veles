@@ -144,6 +144,7 @@ fn manifest() -> Result<(), VelesError> {
 
     println!("{:?}", nodes);
 
+    let mut ref_hash = String::new();
     let mut hashes: HashMap<OsString, String> = HashMap::new();
     let mut nodes: Vec<VelesNode> = nodes.into_values().collect();
     let mut i = 0;
@@ -170,6 +171,10 @@ fn manifest() -> Result<(), VelesError> {
 
             nodes.remove(i);
 
+            if nodes.len() == 0 {
+                ref_hash = hex_digest[..40].to_owned();
+            }
+
             if i == nodes.len() {
                 i = 0;
             }
@@ -181,6 +186,46 @@ fn manifest() -> Result<(), VelesError> {
             }
         }
     }
+
+    let conn = Connection::open(".veles/veles.db3")?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS refs (
+            name TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL
+        )",
+        (),
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS changes (
+            id INTEGER PRIMARY KEY,
+            tree TEXT NOT NULL,
+            description TEXT NOT NULL
+        )",
+        (),
+    )?;
+
+    conn.execute(
+        "INSERT INTO changes (id, tree, description) VALUES (NULL, ?1, ?2)",
+        (&ref_hash, "Testing 123."),
+    )?;
+
+    let mut statement = conn.prepare("SELECT id FROM changes WHERE tree = ?1")?;
+    let id: i32 = statement.query_row([&ref_hash], |row| row.get(0))?;
+
+    conn.execute(
+        "INSERT OR REPLACE INTO refs (name, revision) VALUES ('main', ?1)",
+        [id]
+    )?;
+
+    let mut statement = conn.prepare("SELECT revision FROM refs WHERE name = 'main'")?;
+    let revision: i32 = statement.query_row([], |row| row.get(0))?;
+
+    let mut statement = conn.prepare("SELECT tree FROM changes WHERE id = ?1")?;
+    let new_hash: String = statement.query_row([revision], |row| row.get(0))?;
+
+    println!("Main is now at revision {} : {}", revision, new_hash);
 
     Ok(())
 }
