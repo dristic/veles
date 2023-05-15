@@ -1,9 +1,9 @@
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Write, BufWriter},
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::SystemTime, ffi::OsString,
 };
 
 use clap::{Parser, Subcommand};
@@ -51,6 +51,7 @@ enum Command {
     },
     Status,
     Log,
+    Manifest,
     Storage {
         #[command(subcommand)]
         command: StorageCmd,
@@ -91,8 +92,97 @@ fn main() {
         Command::Add { file } => add(file),
         Command::Submit { message } => submit(message),
         Command::Log => log(),
+        Command::Manifest => manifest(),
     }
     .unwrap()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct VelesNode {
+    name: OsString,
+    items: Vec<VelesNode>,
+    hash: Option<String>,
+}
+
+fn manifest() -> Result<(), VelesError> {
+    let mut nodes = HashMap::new();
+
+    let iter = DirIterator::from_ignorefile(".", ".velesignore", true)?;
+    for path in iter {
+        if path.is_dir() {
+            nodes.insert(path.clone(), VelesNode {
+                name: path.file_name().unwrap().to_owned(),
+                items: Vec::new(),
+                hash: None,
+            });
+        }
+
+        if let Some(parent) = path.parent() {
+            let parent = parent.to_owned();
+            if !nodes.contains_key(&parent) {
+                nodes.insert(parent.clone(), VelesNode {
+                    name: parent.file_name().unwrap_or_default().to_owned(),
+                    items: Vec::new(),
+                    hash: None,
+                });
+            }
+
+            let hash = if path.is_file() {
+                Some(do_commit(path.clone())?)
+            } else {
+                None
+            };
+
+            let node = nodes.get_mut(&parent).unwrap();
+            node.items.push(VelesNode {
+                name: path.file_name().unwrap().to_owned(),
+                items: Vec::new(),
+                hash,
+            });
+        }
+    }
+
+    println!("{:?}", nodes);
+
+    let mut hashes: HashMap<OsString, String> = HashMap::new();
+    let mut nodes: Vec<VelesNode> = nodes.into_values().collect();
+    let mut i = 0;
+    while nodes.len() > 0 {
+        let node = &nodes[i];
+
+        let ready = node.items.iter().all(|n| n.hash.is_some() || hashes.contains_key(&n.name));
+        if ready {
+            let mut contents = String::new();
+
+            for item in &node.items {
+                let item_hash = item.hash.as_ref().unwrap_or_else(|| hashes.get(&item.name).unwrap());
+                contents.push_str(&format!("{} {}\n", item_hash, item.name.to_string_lossy()));
+            }
+
+            let mut context = digest::Context::new(&digest::SHA256);
+            context.update(contents.as_bytes());
+            let digest = context.finish();
+            let hex_digest = hex::encode(&digest);
+
+            hashes.insert(node.name.clone(), hex_digest[..40].to_owned());
+
+            println!("Adding tree {}:\n{}", hex_digest[..40].to_owned(), contents);
+
+            nodes.remove(i);
+
+            if i == nodes.len() {
+                i = 0;
+            }
+        } else {
+            i += 1;
+
+            if i == nodes.len() {
+                i = 0;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 struct VelesChange {
@@ -171,7 +261,7 @@ fn log() -> Result<(), VelesError> {
 
         for file in file_iter {
             let file = file?;
-            println!("  File: {}", file.filename);
+            println!("  File: {} {}", file.filename, file.revision);
         }
 
         println!("====================");
@@ -291,7 +381,7 @@ struct DirIterator {
 }
 
 impl DirIterator {
-    pub fn from_ignorefile<P: AsRef<Path>>(base: P, ignore: P) -> Result<DirIterator, VelesError> {
+    pub fn from_ignorefile<P: AsRef<Path>>(base: P, ignore: P, include_dirs: bool) -> Result<DirIterator, VelesError> {
         let mut stack = Vec::new();
         let base_path = base.as_ref().to_path_buf();
         let ignore = ignore.as_ref().to_path_buf();
@@ -306,12 +396,12 @@ impl DirIterator {
             Vec::new()
         };
 
-        DirIterator::visit(base.as_ref(), &filter, &mut stack)?;
+        DirIterator::visit(base.as_ref(), &filter, &mut stack, include_dirs)?;
 
         Ok(DirIterator { stack, pos: 0 })
     }
 
-    fn visit(path: &Path, filter: &[PathBuf], stack: &mut Vec<PathBuf>) -> Result<(), VelesError> {
+    fn visit(path: &Path, filter: &[PathBuf], stack: &mut Vec<PathBuf>, include_dirs: bool) -> Result<(), VelesError> {
         if path.is_dir() {
             for entry in fs::read_dir(path)? {
                 let entry = entry?;
@@ -322,7 +412,10 @@ impl DirIterator {
                 }
 
                 if path.is_dir() {
-                    DirIterator::visit(&path, filter, stack)?;
+                    if include_dirs {
+                        stack.push(path.to_path_buf());
+                    }
+                    DirIterator::visit(&path, filter, stack, include_dirs)?;
                 } else {
                     stack.push(path.to_path_buf());
                 }
@@ -361,7 +454,7 @@ fn index(command: &IndexCmd) -> Result<(), VelesError> {
             let timestamp = SystemTime::now();
             let mut index = HashMap::new();
 
-            let iter = DirIterator::from_ignorefile(".", ".velesignore")?;
+            let iter = DirIterator::from_ignorefile(".", ".velesignore", false)?;
             for path in iter {
                 let metadata = fs::metadata(&path)?;
 
@@ -387,7 +480,7 @@ fn index(command: &IndexCmd) -> Result<(), VelesError> {
 
             let index: VelesIndex = bincode::deserialize(&data)?;
 
-            let iter = DirIterator::from_ignorefile(".", ".velesignore")?;
+            let iter = DirIterator::from_ignorefile(".", ".velesignore", false)?;
             for path in iter {
                 let metadata = fs::metadata(&path)?;
                 if let Some(indexed) = index.index.get(&path) {
@@ -407,7 +500,7 @@ fn index(command: &IndexCmd) -> Result<(), VelesError> {
 }
 
 fn status() -> Result<(), VelesError> {
-    let iter = DirIterator::from_ignorefile(".", ".velesignore")?;
+    let iter = DirIterator::from_ignorefile(".", ".velesignore", false)?;
     for path in iter {
         println!("{:?}", path);
     }
