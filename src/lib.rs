@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::{Read, Write, BufWriter},
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::SystemTime, ffi::OsString,
 };
@@ -9,6 +9,7 @@ use std::{
 use clap::{Parser, Subcommand};
 use error::VelesError;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use log::info;
 use ring::digest;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -16,16 +17,17 @@ use storage::VelesStore;
 
 mod error;
 mod storage;
+mod core;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
-struct Args {
+pub struct Args {
     #[command(subcommand)]
-    command: Command,
+    pub command: Command,
 }
 
 #[derive(Subcommand)]
-enum Command {
+pub enum Command {
     Commit {
         #[arg(short, long)]
         file: String,
@@ -56,16 +58,17 @@ enum Command {
         #[command(subcommand)]
         command: StorageCmd,
     },
+    Server,
 }
 
 #[derive(Subcommand)]
-enum IndexCmd {
+pub enum IndexCmd {
     Create,
     Status,
 }
 
 #[derive(Subcommand)]
-enum StorageCmd {
+pub enum StorageCmd {
     Get {
         #[arg(short, long)]
         key: String,
@@ -80,21 +83,10 @@ enum StorageCmd {
     Compact,
 }
 
-fn main() {
-    let args = Args::parse();
+pub fn server() -> Result<(), VelesError> {
+    info!("Starting server");
 
-    match args.command {
-        Command::Commit { file } => commit(file),
-        Command::Uncommit { hash, output } => uncommit(hash, output),
-        Command::Status => status(),
-        Command::Storage { command } => storage(&command),
-        Command::Index { command } => index(&command),
-        Command::Add { file } => add(file),
-        Command::Submit { message } => submit(message),
-        Command::Log => log(),
-        Command::Manifest => manifest(),
-    }
-    .unwrap()
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -104,7 +96,7 @@ struct VelesNode {
     hash: Option<String>,
 }
 
-fn manifest() -> Result<(), VelesError> {
+pub fn manifest() -> Result<(), VelesError> {
     let mut nodes = HashMap::new();
 
     let iter = DirIterator::from_ignorefile(".", ".velesignore", true)?;
@@ -142,7 +134,7 @@ fn manifest() -> Result<(), VelesError> {
         }
     }
 
-    println!("{:?}", nodes);
+    println!("Built node tree: {:?}", nodes);
 
     let mut ref_hash = String::new();
     let mut hashes: HashMap<OsString, String> = HashMap::new();
@@ -240,7 +232,7 @@ struct VelesFile {
     revision: u32,
 }
 
-fn log() -> Result<(), VelesError> {
+pub fn log() -> Result<(), VelesError> {
     let conn = Connection::open(".veles/veles.db3")?;
 
     conn.execute(
@@ -315,7 +307,7 @@ fn log() -> Result<(), VelesError> {
     Ok(())
 }
 
-fn submit(message: String) -> Result<(), VelesError> {
+pub fn submit(message: String) -> Result<(), VelesError> {
     let stage_path = PathBuf::from(".veles/staged.bin");
     if !stage_path.exists() {
         return Err(VelesError::NotFound);
@@ -334,7 +326,7 @@ fn submit(message: String) -> Result<(), VelesError> {
     Ok(())
 }
 
-fn add(file: PathBuf) -> Result<(), VelesError> {
+pub fn add(file: PathBuf) -> Result<(), VelesError> {
     if !file.exists() {
         return Err(VelesError::NotFound);
     }
@@ -352,7 +344,7 @@ fn add(file: PathBuf) -> Result<(), VelesError> {
     Ok(())
 }
 
-fn uncommit(hash: String, output: Option<String>) -> Result<(), VelesError> {
+pub fn uncommit(hash: String, output: Option<String>) -> Result<(), VelesError> {
     let path = PathBuf::from(".veles/").join(&hash[..2]);
     let file_path = path.join(&hash[2..]);
     let file = OpenOptions::new().read(true).open(file_path)?;
@@ -375,7 +367,7 @@ fn uncommit(hash: String, output: Option<String>) -> Result<(), VelesError> {
     Ok(())
 }
 
-fn commit(file: String) -> Result<(), VelesError> {
+pub fn commit(file: String) -> Result<(), VelesError> {
     let hash = do_commit(PathBuf::from(file))?;
 
     println!("Wrote {}", hash);
@@ -383,7 +375,7 @@ fn commit(file: String) -> Result<(), VelesError> {
     Ok(())
 }
 
-fn do_commit(file: PathBuf) -> Result<String, VelesError> {
+pub fn do_commit(file: PathBuf) -> Result<String, VelesError> {
     let mut file = OpenOptions::new().read(true).open(file)?;
 
     let mut buffer = [0; 1024];
@@ -493,7 +485,7 @@ struct VelesIndexMeta {
     modified: SystemTime,
 }
 
-fn index(command: &IndexCmd) -> Result<(), VelesError> {
+pub fn index(command: &IndexCmd) -> Result<(), VelesError> {
     match command {
         IndexCmd::Create => {
             let timestamp = SystemTime::now();
@@ -544,7 +536,7 @@ fn index(command: &IndexCmd) -> Result<(), VelesError> {
     Ok(())
 }
 
-fn status() -> Result<(), VelesError> {
+pub fn status() -> Result<(), VelesError> {
     let iter = DirIterator::from_ignorefile(".", ".velesignore", false)?;
     for path in iter {
         println!("{:?}", path);
@@ -553,7 +545,7 @@ fn status() -> Result<(), VelesError> {
     Ok(())
 }
 
-fn storage(command: &StorageCmd) -> Result<(), VelesError> {
+pub fn storage(command: &StorageCmd) -> Result<(), VelesError> {
     let mut veles = VelesStore::new()?;
 
     match command {
