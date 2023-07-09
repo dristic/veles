@@ -4,6 +4,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum VelesError {
+    #[error("Repository not initialized")]
+    NotInitialized,
+
     #[error("IO error")]
     IOError(#[from] std::io::Error),
 

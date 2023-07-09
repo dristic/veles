@@ -1,87 +1,22 @@
 use std::{
     collections::HashMap,
+    ffi::OsString,
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::SystemTime, ffi::OsString,
 };
 
-use clap::{Parser, Subcommand};
 use error::VelesError;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use log::info;
 use ring::digest;
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
-use storage::VelesStore;
 
-mod error;
-mod storage;
-mod core;
-
-#[derive(Parser)]
-#[command(author, version, about, long_about = None)]
-pub struct Args {
-    #[command(subcommand)]
-    pub command: Command,
-}
-
-#[derive(Subcommand)]
-pub enum Command {
-    Commit {
-        #[arg(short, long)]
-        file: String,
-    },
-    Uncommit {
-        #[arg(long)]
-        hash: String,
-
-        #[arg(short, long)]
-        output: Option<String>,
-    },
-    Index {
-        #[command(subcommand)]
-        command: IndexCmd,
-    },
-    Add {
-        #[arg(short, long)]
-        file: PathBuf,
-    },
-    Submit {
-        #[arg(short, long)]
-        message: String,
-    },
-    Status,
-    Log,
-    Manifest,
-    Storage {
-        #[command(subcommand)]
-        command: StorageCmd,
-    },
-    Server,
-}
-
-#[derive(Subcommand)]
-pub enum IndexCmd {
-    Create,
-    Status,
-}
-
-#[derive(Subcommand)]
-pub enum StorageCmd {
-    Get {
-        #[arg(short, long)]
-        key: String,
-    },
-    Put {
-        #[arg(short, long)]
-        key: String,
-
-        #[arg(short, long)]
-        value: String,
-    },
-    Compact,
-}
+pub mod client;
+pub mod core;
+pub mod error;
+pub mod protocol;
+pub mod storage;
 
 pub fn server() -> Result<(), VelesError> {
     info!("Starting server");
@@ -102,21 +37,27 @@ pub fn manifest() -> Result<(), VelesError> {
     let iter = DirIterator::from_ignorefile(".", ".velesignore", true)?;
     for path in iter {
         if path.is_dir() {
-            nodes.insert(path.clone(), VelesNode {
-                name: path.file_name().unwrap().to_owned(),
-                items: Vec::new(),
-                hash: None,
-            });
+            nodes.insert(
+                path.clone(),
+                VelesNode {
+                    name: path.file_name().unwrap().to_owned(),
+                    items: Vec::new(),
+                    hash: None,
+                },
+            );
         }
 
         if let Some(parent) = path.parent() {
             let parent = parent.to_owned();
             if !nodes.contains_key(&parent) {
-                nodes.insert(parent.clone(), VelesNode {
-                    name: parent.file_name().unwrap_or_default().to_owned(),
-                    items: Vec::new(),
-                    hash: None,
-                });
+                nodes.insert(
+                    parent.clone(),
+                    VelesNode {
+                        name: parent.file_name().unwrap_or_default().to_owned(),
+                        items: Vec::new(),
+                        hash: None,
+                    },
+                );
             }
 
             let hash = if path.is_file() {
@@ -140,22 +81,28 @@ pub fn manifest() -> Result<(), VelesError> {
     let mut hashes: HashMap<OsString, String> = HashMap::new();
     let mut nodes: Vec<VelesNode> = nodes.into_values().collect();
     let mut i = 0;
-    while nodes.len() > 0 {
+    while !nodes.is_empty() {
         let node = &nodes[i];
 
-        let ready = node.items.iter().all(|n| n.hash.is_some() || hashes.contains_key(&n.name));
+        let ready = node
+            .items
+            .iter()
+            .all(|n| n.hash.is_some() || hashes.contains_key(&n.name));
         if ready {
             let mut contents = String::new();
 
             for item in &node.items {
-                let item_hash = item.hash.as_ref().unwrap_or_else(|| hashes.get(&item.name).unwrap());
+                let item_hash = item
+                    .hash
+                    .as_ref()
+                    .unwrap_or_else(|| hashes.get(&item.name).unwrap());
                 contents.push_str(&format!("{} {}\n", item_hash, item.name.to_string_lossy()));
             }
 
             let mut context = digest::Context::new(&digest::SHA256);
             context.update(contents.as_bytes());
             let digest = context.finish();
-            let hex_digest = hex::encode(&digest);
+            let hex_digest = hex::encode(digest);
 
             hashes.insert(node.name.clone(), hex_digest[..40].to_owned());
 
@@ -163,7 +110,7 @@ pub fn manifest() -> Result<(), VelesError> {
 
             nodes.remove(i);
 
-            if nodes.len() == 0 {
+            if nodes.is_empty() {
                 ref_hash = hex_digest[..40].to_owned();
             }
 
@@ -208,7 +155,7 @@ pub fn manifest() -> Result<(), VelesError> {
 
     conn.execute(
         "INSERT OR REPLACE INTO refs (name, revision) VALUES ('main', ?1)",
-        [id]
+        [id],
     )?;
 
     let mut statement = conn.prepare("SELECT revision FROM refs WHERE name = 'main'")?;
@@ -356,12 +303,10 @@ pub fn uncommit(hash: String, output: Option<String>) -> Result<(), VelesError> 
     if let Some(out) = output {
         let mut new_file = OpenOptions::new().create(true).write(true).open(out)?;
         new_file.write_all(&buf)?;
+    } else if let Ok(str) = String::from_utf8(buf) {
+        println!("{}", str);
     } else {
-        if let Ok(str) = String::from_utf8(buf) {
-            println!("{}", str);
-        } else {
-            println!("Failed to parse data as utf-8");
-        }
+        println!("Failed to parse data as utf-8");
     }
 
     Ok(())
@@ -394,7 +339,7 @@ pub fn do_commit(file: PathBuf) -> Result<String, VelesError> {
     }
 
     let digest = context.finish();
-    let hex_digest = hex::encode(&digest);
+    let hex_digest = hex::encode(digest);
     let compressed = encoder.finish()?;
 
     let path = PathBuf::from(".veles/").join(&hex_digest[..2]);
@@ -412,13 +357,17 @@ pub fn do_commit(file: PathBuf) -> Result<String, VelesError> {
     Ok(hex_digest[..40].to_string())
 }
 
-struct DirIterator {
+pub struct DirIterator {
     stack: Vec<PathBuf>,
     pos: usize,
 }
 
 impl DirIterator {
-    pub fn from_ignorefile<P: AsRef<Path>>(base: P, ignore: P, include_dirs: bool) -> Result<DirIterator, VelesError> {
+    pub fn from_ignorefile<P: AsRef<Path>>(
+        base: P,
+        ignore: P,
+        include_dirs: bool,
+    ) -> Result<DirIterator, VelesError> {
         let mut stack = Vec::new();
         let base_path = base.as_ref().to_path_buf();
         let ignore = ignore.as_ref().to_path_buf();
@@ -438,7 +387,12 @@ impl DirIterator {
         Ok(DirIterator { stack, pos: 0 })
     }
 
-    fn visit(path: &Path, filter: &[PathBuf], stack: &mut Vec<PathBuf>, include_dirs: bool) -> Result<(), VelesError> {
+    fn visit(
+        path: &Path,
+        filter: &[PathBuf],
+        stack: &mut Vec<PathBuf>,
+        include_dirs: bool,
+    ) -> Result<(), VelesError> {
         if path.is_dir() {
             for entry in fs::read_dir(path)? {
                 let entry = entry?;
@@ -473,93 +427,10 @@ impl Iterator for DirIterator {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
-struct VelesIndex {
-    timestamp: SystemTime,
-    index: HashMap<PathBuf, VelesIndexMeta>,
-}
-
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
-struct VelesIndexMeta {
-    created: SystemTime,
-    modified: SystemTime,
-}
-
-pub fn index(command: &IndexCmd) -> Result<(), VelesError> {
-    match command {
-        IndexCmd::Create => {
-            let timestamp = SystemTime::now();
-            let mut index = HashMap::new();
-
-            let iter = DirIterator::from_ignorefile(".", ".velesignore", false)?;
-            for path in iter {
-                let metadata = fs::metadata(&path)?;
-
-                index.insert(
-                    path.clone(),
-                    VelesIndexMeta {
-                        created: metadata.created()?,
-                        modified: metadata.modified()?,
-                    },
-                );
-
-                println!("{:?}", metadata);
-            }
-
-            let index = VelesIndex { timestamp, index };
-            let data = bincode::serialize(&index)?;
-            fs::write(".veles/index", data)?;
-        }
-        IndexCmd::Status => {
-            let mut file = OpenOptions::new().read(true).open(".veles/index")?;
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
-
-            let index: VelesIndex = bincode::deserialize(&data)?;
-
-            let iter = DirIterator::from_ignorefile(".", ".velesignore", false)?;
-            for path in iter {
-                let metadata = fs::metadata(&path)?;
-                if let Some(indexed) = index.index.get(&path) {
-                    if indexed.modified == metadata.modified()? {
-                        println!("Unchanged: {:?}", path);
-                    } else {
-                        println!("Modified: {:?}", path);
-                    }
-                } else {
-                    println!("New: {:?}", path);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 pub fn status() -> Result<(), VelesError> {
     let iter = DirIterator::from_ignorefile(".", ".velesignore", false)?;
     for path in iter {
         println!("{:?}", path);
-    }
-
-    Ok(())
-}
-
-pub fn storage(command: &StorageCmd) -> Result<(), VelesError> {
-    let mut veles = VelesStore::new()?;
-
-    match command {
-        StorageCmd::Get { key } => {
-            let value = veles.get(&key)?;
-            println!("{}: {}", key, value);
-        }
-        StorageCmd::Put { key, value } => {
-            veles.put(key, value)?;
-            println!("Put {}: {}", key, value);
-        }
-        StorageCmd::Compact => {
-            veles.compact()?;
-        }
     }
 
     Ok(())

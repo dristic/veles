@@ -113,7 +113,7 @@ impl VelesStore {
             // Get the value offset and return the value.
             let header: RowHeader = bincode::deserialize_from(&data[4..HEADER_SIZE + 4])?;
             let value_offset = 4 + HEADER_SIZE + header.key_size as usize;
-            let value = String::from_utf8((&data[value_offset..]).to_vec()).unwrap();
+            let value = String::from_utf8(data[value_offset..].to_vec()).unwrap();
             return Ok(value);
         }
 
@@ -144,8 +144,8 @@ impl VelesStore {
         hasher.update(&data);
         let crc = hasher.finalize();
 
-        self.write_file.write(&crc.to_be_bytes())?;
-        self.write_file.write(&data)?;
+        self.write_file.write_all(&crc.to_be_bytes())?;
+        self.write_file.write_all(&data)?;
 
         Ok(())
     }
