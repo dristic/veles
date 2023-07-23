@@ -1,89 +1,58 @@
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 
 use clap::{Parser, Subcommand};
-use log::LevelFilter;
+use log::{LevelFilter, error};
 use simple_logger::SimpleLogger;
 
-use veles::{client::VelesClient, error::VelesError, storage::VelesStore};
+use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
+use veles::{
+    client::{ChangeListEntry, IndexState, VelesClient},
+    error::VelesError,
+};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
-pub struct Cli {
+struct Cli {
     #[arg(short, long)]
-    pub debug: bool,
+    debug: bool,
 
     #[command(subcommand)]
-    pub command: Command,
+    command: Command,
 }
 
 #[derive(Subcommand)]
-pub enum Command {
+enum Command {
     Init,
+    Config {
+        #[arg(short, long)]
+        username: Option<String>,
+    },
     Add {
         file: PathBuf,
     },
-    Status,
-    Changesets,
-    Changes,
-    Commit {
-        #[arg(short, long)]
-        file: String,
+    Remove {
+        file: PathBuf,
     },
-    Uncommit {
-        #[arg(long)]
-        hash: String,
-
-        #[arg(short, long)]
-        output: Option<String>,
+    Changes,
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
     },
     Submit {
         #[arg(short, long)]
-        message: String,
+        description: String,
     },
-    Log,
-    Manifest,
-    Storage {
-        #[command(subcommand)]
-        command: StorageCmd,
-    },
+    Changelog,
     Server,
 }
 
 #[derive(Subcommand)]
-pub enum StorageCmd {
-    Get {
-        #[arg(short, long)]
-        key: String,
-    },
-    Put {
-        #[arg(short, long)]
-        key: String,
-
-        #[arg(short, long)]
-        value: String,
-    },
-    Compact,
+enum TaskCommand {
+    Create { name: String },
+    Delete { name: String },
 }
 
-pub fn storage(command: &StorageCmd) -> Result<(), VelesError> {
-    let mut veles = VelesStore::new()?;
-
-    match command {
-        StorageCmd::Get { key } => {
-            let value = veles.get(key)?;
-            println!("{}: {}", key, value);
-        }
-        StorageCmd::Put { key, value } => {
-            veles.put(key, value)?;
-            println!("Put {}: {}", key, value);
-        }
-        StorageCmd::Compact => {
-            veles.compact()?;
-        }
-    }
-
-    Ok(())
-}
+impl Cli {}
 
 fn main() {
     let args = Cli::parse();
@@ -97,25 +66,23 @@ fn main() {
     SimpleLogger::new().with_level(log_level).init().unwrap();
 
     let result = match args.command {
-        // Official commands.
         Command::Init => init(),
-        Command::Status => status(),
-        Command::Changesets => changesets(),
-        Command::Changes => changes(),
-
-        // WIP commands.
-        Command::Commit { file } => veles::commit(file),
-        Command::Uncommit { hash, output } => veles::uncommit(hash, output),
-        Command::Storage { command } => storage(&command),
+        Command::Config { username } => config(username),
         Command::Add { file } => add(file),
-        Command::Submit { message } => veles::submit(message),
-        Command::Log => veles::log(),
-        Command::Manifest => veles::manifest(),
-        Command::Server => veles::server(),
+        Command::Remove { file: _ } => todo!(),
+        Command::Changes => changes(),
+        Command::Task { command: _ } => todo!(),
+        Command::Submit { description } => submit(description),
+        Command::Changelog => changelog(),
+        Command::Server => todo!(),
     };
 
     if let Err(e) = result {
         println!("{}", e);
+
+        if args.debug {
+            error!("{:?}", e);
+        }
     }
 }
 
@@ -129,16 +96,18 @@ fn init() -> Result<(), VelesError> {
     result
 }
 
-fn status() -> Result<(), VelesError> {
-    let client = VelesClient::new()?;
+fn config(username: Option<String>) -> Result<(), VelesError> {
+    let should_output = username.is_none();
+    let mut client = VelesClient::new()?;
+    let config = client.config(username)?;
 
-    client.status()
-}
+    if should_output {
+        println!("{}", config);
+    } else {
+        println!("Config updated.");
+    }
 
-fn changesets() -> Result<(), VelesError> {
-    let client = VelesClient::new()?;
-
-    client.changesets()
+    Ok(())
 }
 
 fn add(file: PathBuf) -> Result<(), VelesError> {
@@ -153,6 +122,68 @@ fn add(file: PathBuf) -> Result<(), VelesError> {
 
 fn changes() -> Result<(), VelesError> {
     let client = VelesClient::new()?;
+    let changes = client.changes()?;
 
-    client.changes()
+    let mut stdout = StandardStream::stdout(ColorChoice::Always);
+
+    writeln!(&mut stdout, "On /main")?;
+    writeln!(&mut stdout)?;
+
+    // Added header
+    stdout.set_color(ColorSpec::new().set_bold(true).set_fg(Some(Color::Green)))?;
+    writeln!(&mut stdout, "Added:")?;
+
+    // Added files
+    stdout.set_color(&ColorSpec::new())?;
+    let added: Vec<&ChangeListEntry> = changes
+        .iter()
+        .filter(|item| item.state == IndexState::Added)
+        .collect();
+    for file in added {
+        writeln!(&mut stdout, "\t{:?}", file.path)?;
+    }
+    writeln!(&mut stdout)?;
+
+    // Untracked header
+    stdout.set_color(ColorSpec::new().set_bold(true).set_fg(Some(Color::Blue)))?;
+    writeln!(&mut stdout, "Untracked:")?;
+
+    // Untracked files
+    stdout.set_color(&ColorSpec::new())?;
+    let untracked: Vec<&ChangeListEntry> = changes
+        .iter()
+        .filter(|item| item.state == IndexState::Untracked)
+        .collect();
+    for file in untracked {
+        writeln!(&mut stdout, "\t{:?}", file.path)?;
+    }
+
+    Ok(())
+}
+
+fn changelog() -> Result<(), VelesError> {
+    let client = VelesClient::new()?;
+    let changesets = client.changesets()?;
+
+    let mut stdout = StandardStream::stdout(ColorChoice::Always);
+
+    for changeset in changesets {
+        stdout.set_color(ColorSpec::new().set_bold(true).set_fg(Some(Color::Cyan)))?;
+        writeln!(&mut stdout, "Changeset {}", changeset.id)?;
+        stdout.set_color(&ColorSpec::new())?;
+        writeln!(&mut stdout, "Author: {}", changeset.user)?;
+        writeln!(&mut stdout, "")?;
+        writeln!(&mut stdout, "\t{}", changeset.description)?;
+        writeln!(&mut stdout, "")?;
+    }
+
+    Ok(())
+}
+
+fn submit(description: String) -> Result<(), VelesError> {
+    let client = VelesClient::new()?;
+
+    client.submit(description)?;
+
+    Ok(())
 }

@@ -10,6 +10,12 @@ pub enum VelesError {
     #[error("IO error")]
     IOError(#[from] std::io::Error),
 
+    #[error("TOML parse error")]
+    TOMLParseError(#[from] toml::de::Error),
+
+    #[error("TOML serialize error")]
+    TOMLSerializeError(#[from] toml::ser::Error),
+
     #[error("Serialization error")]
     SerializationError(#[from] bincode::Error),
 

@@ -1,27 +1,29 @@
 use std::{
     collections::HashMap,
     ffi::OsString,
-    fs::{self, OpenOptions},
+    fs::OpenOptions,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use error::VelesError;
-use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-use log::info;
+use flate2::read::GzDecoder;
 use ring::digest;
 use rusqlite::Connection;
 
+use crate::util::DirIterator;
+
 pub mod client;
+pub mod config;
 pub mod core;
 pub mod error;
 pub mod protocol;
+pub mod repo;
 pub mod storage;
+pub mod util;
 
-pub fn server() -> Result<(), VelesError> {
-    info!("Starting server");
-
-    Ok(())
+pub trait Finalize {
+    fn finalize(self) -> Result<String, VelesError>;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -60,11 +62,12 @@ pub fn manifest() -> Result<(), VelesError> {
                 );
             }
 
-            let hash = if path.is_file() {
-                Some(do_commit(path.clone())?)
-            } else {
-                None
-            };
+            // let hash = if path.is_file() {
+            //     Some(do_commit(path.clone())?)
+            // } else {
+            //     None
+            // };
+            let hash = None;
 
             let node = nodes.get_mut(&parent).unwrap();
             node.items.push(VelesNode {
@@ -169,126 +172,10 @@ pub fn manifest() -> Result<(), VelesError> {
     Ok(())
 }
 
-struct VelesChange {
-    id: u32,
-    description: String,
-}
-
-struct VelesFile {
-    filename: String,
-    revision: u32,
-}
-
-pub fn log() -> Result<(), VelesError> {
-    let conn = Connection::open(".veles/veles.db3")?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS files (
-            filename TEXT PRIMARY KEY,
-            revision INTEGER NOT NULL
-        )",
-        (),
-    )?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS changes (
-            id INTEGER PRIMARY KEY,
-            description TEXT NOT NULL
-        )",
-        (),
-    )?;
-
-    conn.execute(
-        "INSERT OR IGNORE INTO files (filename, revision) VALUES (?1, ?2)",
-        ("src/error.rs", 1),
-    )?;
-
-    conn.execute(
-        "INSERT OR IGNORE INTO files (filename, revision) VALUES (?1, ?2)",
-        ("src/main.rs", 2),
-    )?;
-
-    conn.execute(
-        "INSERT OR IGNORE INTO files (filename, revision) VALUES (?1, ?2)",
-        ("src/storage.rs", 2),
-    )?;
-
-    conn.execute(
-        "INSERT OR IGNORE INTO changes (id, description) VALUES (?1, ?2)",
-        (1, "Initial commit."),
-    )?;
-
-    conn.execute(
-        "INSERT OR IGNORE INTO changes (id, description) VALUES (?1, ?2)",
-        (2, "Testing."),
-    )?;
-
-    let mut statement = conn.prepare("SELECT id, description FROM changes")?;
-    let change_iter = statement.query_map([], |row| {
-        Ok(VelesChange {
-            id: row.get(0)?,
-            description: row.get(1)?,
-        })
-    })?;
-
-    for change in change_iter {
-        let change = change?;
-        println!("Change: {} - {}", change.id, change.description);
-
-        let mut statement = conn.prepare("SELECT filename FROM files WHERE revision = ?1")?;
-        let file_iter = statement.query_map([change.id], |row| {
-            Ok(VelesFile {
-                filename: row.get(0)?,
-                revision: change.id,
-            })
-        })?;
-
-        for file in file_iter {
-            let file = file?;
-            println!("  File: {} {}", file.filename, file.revision);
-        }
-
-        println!("====================");
-    }
-
-    Ok(())
-}
-
-pub fn submit(message: String) -> Result<(), VelesError> {
-    let stage_path = PathBuf::from(".veles/staged.bin");
-    if !stage_path.exists() {
-        return Err(VelesError::NotFound);
-    }
-
-    let hash = do_commit(stage_path)?;
-
-    let mut commits = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(".veles/commits.bin")?;
-    let line = format!("{}\n{}\n{}\n", "1", message, hash);
-
-    commits.write_all(line.as_bytes())?;
-
-    Ok(())
-}
-
-pub fn add(file: PathBuf) -> Result<(), VelesError> {
-    if !file.exists() {
-        return Err(VelesError::NotFound);
-    }
-
-    let hash = do_commit(file.clone())?;
-
-    let mut stage = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(".veles/staged.bin")?;
-    let content = format!("{} {}\n", file.as_os_str().to_string_lossy(), hash);
-
-    stage.write_all(content.as_bytes())?;
-
-    Ok(())
+pub struct VelesChange {
+    pub id: u32,
+    pub user: String,
+    pub description: String,
 }
 
 pub fn uncommit(hash: String, output: Option<String>) -> Result<(), VelesError> {
@@ -307,130 +194,6 @@ pub fn uncommit(hash: String, output: Option<String>) -> Result<(), VelesError> 
         println!("{}", str);
     } else {
         println!("Failed to parse data as utf-8");
-    }
-
-    Ok(())
-}
-
-pub fn commit(file: String) -> Result<(), VelesError> {
-    let hash = do_commit(PathBuf::from(file))?;
-
-    println!("Wrote {}", hash);
-
-    Ok(())
-}
-
-pub fn do_commit(file: PathBuf) -> Result<String, VelesError> {
-    let mut file = OpenOptions::new().read(true).open(file)?;
-
-    let mut buffer = [0; 1024];
-    let mut context = digest::Context::new(&digest::SHA256);
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-
-    loop {
-        let read = file.read(&mut buffer)?;
-
-        if read == 0 {
-            break;
-        }
-
-        context.update(&buffer[..read]);
-        encoder.write_all(&buffer[..read])?;
-    }
-
-    let digest = context.finish();
-    let hex_digest = hex::encode(digest);
-    let compressed = encoder.finish()?;
-
-    let path = PathBuf::from(".veles/").join(&hex_digest[..2]);
-    fs::create_dir_all(&path)?;
-
-    let new_file_path = path.join(&hex_digest[2..40]);
-    if !new_file_path.exists() {
-        let mut new_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(new_file_path)?;
-        new_file.write_all(&compressed)?;
-    }
-
-    Ok(hex_digest[..40].to_string())
-}
-
-pub struct DirIterator {
-    stack: Vec<PathBuf>,
-    pos: usize,
-}
-
-impl DirIterator {
-    pub fn from_ignorefile<P: AsRef<Path>>(
-        base: P,
-        ignore: P,
-        include_dirs: bool,
-    ) -> Result<DirIterator, VelesError> {
-        let mut stack = Vec::new();
-        let base_path = base.as_ref().to_path_buf();
-        let ignore = ignore.as_ref().to_path_buf();
-
-        let filter: Vec<PathBuf> = if ignore.exists() {
-            let ignore_data = fs::read_to_string(ignore)?;
-            ignore_data
-                .lines()
-                .map(|line| base_path.join(line))
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        DirIterator::visit(base.as_ref(), &filter, &mut stack, include_dirs)?;
-
-        Ok(DirIterator { stack, pos: 0 })
-    }
-
-    fn visit(
-        path: &Path,
-        filter: &[PathBuf],
-        stack: &mut Vec<PathBuf>,
-        include_dirs: bool,
-    ) -> Result<(), VelesError> {
-        if path.is_dir() {
-            for entry in fs::read_dir(path)? {
-                let entry = entry?;
-                let path = entry.path();
-
-                if filter.iter().any(|p| path.starts_with(p)) {
-                    continue;
-                }
-
-                if path.is_dir() {
-                    if include_dirs {
-                        stack.push(path.to_path_buf());
-                    }
-                    DirIterator::visit(&path, filter, stack, include_dirs)?;
-                } else {
-                    stack.push(path.to_path_buf());
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl Iterator for DirIterator {
-    type Item = PathBuf;
-
-    fn next<'a>(&mut self) -> Option<Self::Item> {
-        let pos = self.pos;
-        self.pos += 1;
-        self.stack.get(pos).cloned()
-    }
-}
-
-pub fn status() -> Result<(), VelesError> {
-    let iter = DirIterator::from_ignorefile(".", ".velesignore", false)?;
-    for path in iter {
-        println!("{:?}", path);
     }
 
     Ok(())
