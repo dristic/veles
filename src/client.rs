@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
     io::Read,
-    path::{PathBuf, Path},
+    path::{PathBuf},
     time::SystemTime,
 };
 
@@ -11,10 +11,8 @@ use log::info;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::VelesConfig,
-    error::VelesError,
-    protocol::LocalTransport,
-    DirIterator, Finalize, VelesChange,
+    config::VelesConfig, error::VelesError, protocol::LocalTransport, Changeset, DirIterator,
+    Finalize, VelesChange,
 };
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -102,25 +100,6 @@ pub struct ChangeListEntry {
     pub path: PathBuf,
 }
 
-#[derive(Debug)]
-struct TreeNode {
-    name: String,
-    children: Vec<TreeNode>,
-}
-
-impl TreeNode {
-    fn new(name: String) -> TreeNode {
-        TreeNode {
-            name,
-            children: Vec::new(),
-        }
-    }
-
-    pub fn add_child(&mut self, child: TreeNode) {
-        self.children.push(child);
-    }
-}
-
 pub struct VelesClient {
     config: VelesConfig,
 }
@@ -186,7 +165,7 @@ impl VelesClient {
         Ok(())
     }
 
-    pub fn submit(&self, description: String) -> Result<(), VelesError> {
+    pub fn submit(&self, description: String) -> Result<i64, VelesError> {
         let index = VelesIndex::load()?;
         let transport = LocalTransport::new()?;
 
@@ -199,7 +178,7 @@ impl VelesClient {
 
         let owner = self.config.user.name.clone().unwrap_or_default();
 
-        let mut manifest = Vec::new();
+        let mut changes = Vec::new();
         for path in added {
             let mut writer = transport.send_object()?;
             let mut reader = File::open(path)?;
@@ -207,48 +186,16 @@ impl VelesClient {
             std::io::copy(&mut reader, &mut writer)?;
 
             let hash = writer.finalize()?;
-            manifest.push((path, hash));
+            changes.push((path.to_string_lossy().to_string(), hash));
         }
 
-        let base_path = std::env::current_dir()?;
-        let ignore = PathBuf::from(".velesignore");
-        let ignore_data = fs::read_to_string(ignore)?;
-        let filter: Vec<PathBuf> = ignore_data
-                .lines()
-                .map(|line| base_path.join(line))
-                .collect();
-        let tree = VelesClient::build_tree(&base_path, &filter);
-        println!("{:?}", tree);
+        let changeset = Changeset {
+            owner,
+            description,
+            changes,
+        };
 
-        // transport.submit(&owner, &description)?;
-
-        Ok(())
-    }
-
-    fn build_tree(path: &Path, filter: &Vec<PathBuf>) -> TreeNode {
-        let mut root = TreeNode::new(path.to_string_lossy().to_string());
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let path = entry.path();
-
-                    if filter.iter().any(|p| path.starts_with(p)) {
-                        continue;
-                    }
-
-                    if path.is_dir() {
-                        let child = VelesClient::build_tree(&path, filter);
-                        root.add_child(child);
-                    } else {
-                        let file_name = path.file_name().unwrap().to_string_lossy().to_string();
-                        let child = TreeNode::new(file_name);
-                        root.add_child(child);
-                    }
-                }
-            }
-        }
-
-        root
+        transport.submit(&changeset)
     }
 
     pub fn changes(&self) -> Result<Vec<ChangeListEntry>, VelesError> {

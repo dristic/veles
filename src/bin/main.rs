@@ -1,7 +1,7 @@
 use std::{io::Write, path::PathBuf};
 
 use clap::{Parser, Subcommand};
-use log::{LevelFilter, error};
+use log::{error, LevelFilter};
 use simple_logger::SimpleLogger;
 
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
@@ -172,9 +172,9 @@ fn changelog() -> Result<(), VelesError> {
         writeln!(&mut stdout, "Changeset {}", changeset.id)?;
         stdout.set_color(&ColorSpec::new())?;
         writeln!(&mut stdout, "Author: {}", changeset.user)?;
-        writeln!(&mut stdout, "")?;
+        writeln!(&mut stdout)?;
         writeln!(&mut stdout, "\t{}", changeset.description)?;
-        writeln!(&mut stdout, "")?;
+        writeln!(&mut stdout)?;
     }
 
     Ok(())
@@ -183,7 +183,11 @@ fn changelog() -> Result<(), VelesError> {
 fn submit(description: String) -> Result<(), VelesError> {
     let client = VelesClient::new()?;
 
-    client.submit(description)?;
+    let changeset_id = client.submit(description)?;
+
+    let mut stdout = StandardStream::stdout(ColorChoice::Always);
+    stdout.set_color(ColorSpec::new().set_bold(true).set_fg(Some(Color::Green)))?;
+    writeln!(&mut stdout, "Submitted changeset with ID {}", changeset_id)?;
 
     Ok(())
 }

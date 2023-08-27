@@ -1,4 +1,7 @@
-use std::{path::{PathBuf, Path}, fs};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crate::error::VelesError;
 

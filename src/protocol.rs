@@ -2,7 +2,7 @@ use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{error::VelesError, repo::VelesRepo, Finalize, VelesChange};
+use crate::{error::VelesError, repo::VelesRepo, Changeset, Finalize, VelesChange};
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct VelesMessage {
@@ -35,8 +35,8 @@ impl LocalTransport {
         self.repo.changesets()
     }
 
-    pub fn submit(&self, user: &str, description: &str) -> Result<(), VelesError> {
-        self.repo.submit(user, description)
+    pub fn submit(&self, changeset: &Changeset) -> Result<i64, VelesError> {
+        self.repo.submit(changeset)
     }
 
     pub fn send_object(&self) -> Result<impl Write + Finalize, VelesError> {

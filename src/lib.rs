@@ -10,12 +10,14 @@ use error::VelesError;
 use flate2::read::GzDecoder;
 use ring::digest;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 
 use crate::util::DirIterator;
 
 pub mod client;
 pub mod config;
 pub mod core;
+pub mod dao;
 pub mod error;
 pub mod protocol;
 pub mod repo;
@@ -24,6 +26,13 @@ pub mod util;
 
 pub trait Finalize {
     fn finalize(self) -> Result<String, VelesError>;
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Changeset {
+    pub owner: String,
+    pub description: String,
+    pub changes: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
