@@ -43,6 +43,7 @@ enum Command {
         description: String,
     },
     Changelog,
+    Sync,
     Server,
 }
 
@@ -52,12 +53,10 @@ enum TaskCommand {
     Delete { name: String },
 }
 
-impl Cli {}
-
 fn main() {
-    let args = Cli::parse();
+    let cli = Cli::parse();
 
-    let log_level = if args.debug {
+    let log_level = if cli.debug {
         LevelFilter::Info
     } else {
         LevelFilter::Error
@@ -65,7 +64,7 @@ fn main() {
 
     SimpleLogger::new().with_level(log_level).init().unwrap();
 
-    let result = match args.command {
+    let result = match cli.command {
         Command::Init => init(),
         Command::Config { username } => config(username),
         Command::Add { file } => add(file),
@@ -74,13 +73,14 @@ fn main() {
         Command::Task { command: _ } => todo!(),
         Command::Submit { description } => submit(description),
         Command::Changelog => changelog(),
+        Command::Sync => cli.sync(),
         Command::Server => todo!(),
     };
 
     if let Err(e) = result {
         println!("{}", e);
 
-        if args.debug {
+        if cli.debug {
             error!("{:?}", e);
         }
     }
@@ -190,4 +190,14 @@ fn submit(description: String) -> Result<(), VelesError> {
     writeln!(&mut stdout, "Submitted changeset with ID {}", changeset_id)?;
 
     Ok(())
+}
+
+impl Cli {
+    pub fn sync(&self) -> Result<(), VelesError> {
+        let client = VelesClient::new()?;
+
+        
+
+        Ok(())
+    }
 }

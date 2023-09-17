@@ -87,6 +87,12 @@ impl VelesIndex {
         Ok(index)
     }
 
+    pub fn reset(&mut self) {
+        for item in self.index.values_mut() {
+            (*item).state = IndexState::Untracked;
+        }
+    }
+
     pub fn save(&self) -> Result<(), VelesError> {
         let data = bincode::serialize(&self)?;
         fs::write(".veles/index", data)?;
@@ -166,7 +172,7 @@ impl VelesClient {
     }
 
     pub fn submit(&self, description: String) -> Result<i64, VelesError> {
-        let index = VelesIndex::load()?;
+        let mut index = VelesIndex::load()?;
         let transport = LocalTransport::new()?;
 
         let added: Vec<&PathBuf> = index
@@ -195,7 +201,12 @@ impl VelesClient {
             changes,
         };
 
-        transport.submit(&changeset)
+        let changeset_id = transport.submit(&changeset)?;
+
+        index.reset();
+        index.save()?;
+        
+        Ok(changeset_id)
     }
 
     pub fn changes(&self) -> Result<Vec<ChangeListEntry>, VelesError> {
@@ -215,6 +226,13 @@ impl VelesClient {
         index.save()?;
 
         Ok(result)
+    }
+
+    pub fn sync(&self) -> Result<(), VelesError> {
+        let index = VelesIndex::load()?;
+        let transport = LocalTransport::new()?;
+
+        Ok(())
     }
 
     pub fn changesets(&self) -> Result<Vec<VelesChange>, VelesError> {
