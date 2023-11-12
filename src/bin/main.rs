@@ -68,7 +68,7 @@ fn main() {
         Command::Init => init(),
         Command::Config { username } => config(username),
         Command::Add { file } => add(file),
-        Command::Remove { file: _ } => todo!(),
+        Command::Remove { file } => remove(file),
         Command::Changes => changes(),
         Command::Task { command: _ } => todo!(),
         Command::Submit { description } => submit(description),
@@ -117,6 +117,12 @@ fn add(file: PathBuf) -> Result<(), VelesError> {
     client.add(file_path)?;
 
     println!("Added {:?}", file);
+    Ok(())
+}
+
+pub fn remove(file: PathBuf) -> Result<(), VelesError> {
+    let client = VelesClient::new()?;
+
     Ok(())
 }
 
